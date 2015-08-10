@@ -105,8 +105,9 @@ def _compress(checksums, filename):
     '''
     json_formatted = json.dumps(checksums)
 
-    with gzip.open(filename, 'w') as compressed:
-        compressed.writelines(json_formatted)
+    compressed = gzip.open(filename, 'w')
+    compressed.write(json_formatted)
+    compressed.close()
 
     return 'wrote {0}: (gzipped)'.format(filename)
 
