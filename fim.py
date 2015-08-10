@@ -119,6 +119,9 @@ def checksum(algo='sha256', targets=[], filename='', *args, **kwargs):
     '''
     checksums = {'files': []}
     timestamp = strftime("%Y-%m-%d %H:%M:%S")
+    hostname = __salt__['grains.get']('fqdn')
+    ip_addrs = __salt__['grains.get']('ipv4')
+    hardware = __salt__['grains.get']('virtual')
 
     ## check for preconfigured filename
     if not filename:
@@ -155,7 +158,7 @@ def checksum(algo='sha256', targets=[], filename='', *args, **kwargs):
         if os.path.isfile(target):
             checksums = _collection(checksums, algo, target)
 
-    checksums['files'].append({'timestamp':timestamp})
+    checksums.update({'timestamp':timestamp, 'hostname': hostname, 'ip_addrs': ip_addrs, 'hardware': hardware})
     ## if filename configured, write results to disk
     if filename:
         ret = _compress(checksums, filename)

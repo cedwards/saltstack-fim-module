@@ -50,7 +50,7 @@ and write to defined filename path.
 Configuration
 -------------
 
-An example config file, (```/etc/salt/minion.d/fim.conf```) for this module
+An example config file, (`/etc/salt/minion.d/fim.conf`) for this module
 could look something like this:
 
 .. code-block:: yaml
