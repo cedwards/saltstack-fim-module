@@ -5,32 +5,11 @@ Generic hashing script. Supports files & directories
 from __future__ import absolute_import
 
 import os
-import sys
-import gzip
 import json
+import shutil
+import difflib
 import logging
-import salt.utils
 from time import strftime
-from salt.utils.serializers.msgpack import serialize
-
-HAS_PRELINK = False
-
-PRELINK_PATHS = [
-        '/bin',
-        '/lib',
-        '/sbin',
-        '/lib64',
-        '/usr/bin',
-        '/usr/lib',
-        '/usr/sbin',
-        '/usr/lib64',
-        '/usr/games',
-        '/usr/libexec',
-        '/var/ftp/bin',
-        '/var/ftp/lib'
-        '/var/ftp/lib64'
-        '/usr/kerberos/bin',
-        ]
 
 LOG = logging.getLogger(__name__)
 
@@ -38,77 +17,22 @@ __virtualname__ = 'fim'
 
 
 def __virtual__():
-    if salt.utils.which('prelink'):
-        HAS_PRELINK=True
+    if ('file.get_hash' and 'file.stats') in __salt__:
         return __virtualname__
-    if 'file.get_hash' in __salt__:
-        return __virtualname__ 
-
-
-def _unlink(target):
-    '''
-    Convenience function to handle prelinking issue
-    '''
-    cmd = '{0} {1} {2}'.format('prelink', '-u', target)
-    __salt__['cmd.run'](cmd)
-
-
-def _prelink(target):
-    '''
-    Convenience function to handle prelinking issue
-    '''
-    cmd = '{0} {1} {2}'.format('prelink', '-l', target)
-    __salt__['cmd.run'](cmd)
 
 
 def _hasher(algo, target):
     '''
     Convenience function to handle hashing
     '''
-    ret = None
-    prelink_path = None
-    if HAS_PRELINK:
-        for path in PRELINK_PATHS:
-            if target.startswith(path):
-                prelink_path = path
-                _unlink(target)
-                break
-    ret =  __salt__['file.get_hash'](target, algo)
-    if prelink_path:
-        _prelink(target)
-    return ret
+    return __salt__['file.get_hash'](target, algo)
 
 
 def _stats(target):
     '''
+    Convenience function to handle stats
     '''
     return __salt__['file.stats'](target)
-
-
-def _collection(checksums, algo, path):
-    '''
-    standardizing the dictionary creation
-    '''
-    stats = _stats(path)
-    digest = _hasher(algo, path)
-
-    stats.update({'digest': digest, 'algo': algo})
-
-    checksums['files'].append(stats)
-
-    return checksums
-
-
-def _compress(checksums, filename):
-    '''
-    json-ize and write the content
-    '''
-    json_formatted = json.dumps(checksums)
-
-    with gzip.open(filename, 'w') as compressed:
-        compressed.writelines(json_formatted)
-
-    return 'wrote {0}: (gzipped)'.format(filename)
 
 
 def checksum(algo='sha256', targets=[], filename='', *args, **kwargs):
@@ -117,19 +41,8 @@ def checksum(algo='sha256', targets=[], filename='', *args, **kwargs):
 
     Supports file paths and or directories.
     '''
-    checksums = {'files': []}
-    timestamp = strftime("%Y-%m-%d %H:%M:%S")
+    checksums = {}
     hostname = __salt__['grains.get']('fqdn')
-    ip_addrs = __salt__['grains.get']('ipv4')
-    hardware = __salt__['grains.get']('virtual')
-
-    ## check for preconfigured filename
-    if not filename:
-        try:
-            if __salt__['config.get']('fim:filename'):
-                filename = __salt__['config.get']('fim:filename')
-        except KeyError:
-            LOG.debug('No filename defined. Sending to stdout')
 
     ## check for preconfigured algos
     if not algo:
@@ -154,15 +67,69 @@ def checksum(algo='sha256', targets=[], filename='', *args, **kwargs):
                 for file_ in files:
                     target = os.path.join(root, file_)
                     if os.path.isfile(target):
-                        checksums = _collection(checksums, algo, target)
-        if os.path.isfile(target):
-            checksums = _collection(checksums, algo, target)
-
-    checksums.update({'timestamp':timestamp, 'hostname': hostname, 'ip_addrs': ip_addrs, 'hardware': hardware})
-    ## if filename configured, write results to disk
-    if filename:
-        ret = _compress(checksums, filename)
-        return ret
+                        checksums[target] = {'stats': {}}
+                        checksums[target]['stats'] = _stats(target)
+                        checksums[target]['stats'].update({'checksum': _hasher(algo, target)})
+                        checksums[target]['stats'].update({'hostname': hostname})
+        elif os.path.isfile(target):
+            checksums[target] = {'stats': {}}
+            checksums[target]['stats'] = _stats(target)
+            checksums[target]['stats'].update({'checksum': _hasher(algo, target)})
+            checksums[target]['stats'].update({'hostname': hostname})
 
     return checksums
+
+
+def diff():
+    '''
+    Generate unified diff of two most recent fim.dat files
+    '''
+    diff = []
+
+    timestamp = strftime("%Y-%m-%d")
+
+    new_path = __salt__['config.get']('fim:new_path')
+    old_path = __salt__['config.get']('fim:old_path')
+
+    root_dir = '/var/cache/salt/master/minions/'
+
+    for minion in os.listdir(root_dir):
+        try:
+            for line in difflib.unified_diff(open(root_dir + minion + '/' + 'files' + old_path).readlines(),
+                                             open(root_dir + minion + '/' + 'files' + new_path).readlines(), n=0):
+
+                prefix_line = False
+                for prefix in ('---', '+++', '@@'):
+                    if line.startswith(prefix):
+                        prefix_line = True
+                if not prefix_line:
+                    line = line.strip()
+                    char = line[0]
+                    line = line[1:]
+                    line = line.replace("'", "\"")
+                    line = json.loads(line)
+                    line['diff'] = char
+                    line['timestamp'] = timestamp
+                    diff.append(line)
+        except IOError:
+            LOG.error('No previous run to compare. Run fim.rotate.')
+
+    ret = '\n'.join([json.dumps(s) for s in diff])
+    return ret
+
+
+def rotate():
+    '''
+    Rotate the fim data files to .old
+    '''
+    new_path = __salt__['config.get']('fim:new_path')
+    old_path = __salt__['config.get']('fim:old_path')
+
+    root_dir = '/var/cache/salt/master/minions/'
+
+    for minion in os.listdir(root_dir):
+        shutil.copy(root_dir + minion + '/' + 'files' + new_path,
+                    root_dir + minion + '/' + 'files' + old_path)
+
+    return 'FIM data rotated.'
 
